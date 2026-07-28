@@ -2,7 +2,7 @@
 """
 Antigravity Pure HUD Engine
 A lightweight, zero-dependency status line generator for Antigravity CLI (AGY).
-Features smart dynamic quota polling (instant on chat completion + 60s fallback for long tasks).
+Features smart dynamic quota polling, atomic file caching, real-time countdown decay, and robust model matching.
 """
 
 import sys
@@ -39,6 +39,10 @@ def make_bar(pct, length=10, fill_char="█", empty_char="░"):
     pct = max(0.0, min(100.0, float(pct)))
     filled_len = int(round(length * pct / 100))
     return fill_char * filled_len + empty_char * (length - filled_len)
+
+def normalize_model_name(name):
+    """Normalize model string for accurate tier matching."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 def sync_live_quota():
     """Queries local AGY language server endpoint to get fresh live model quotas."""
@@ -90,14 +94,17 @@ def sync_live_quota():
             "models": model_map
         }
 
+        # Atomic write to prevent file read conflicts
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        tmp_file = CACHE_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(cache_data, f)
+        os.replace(tmp_file, CACHE_FILE)
     except Exception:
         pass
 
 def load_cached_live_quota(model_name, is_idle=False):
-    """Loads cached live quota if fresh, otherwise triggers smart background sync."""
+    """Loads cached live quota if fresh, dynamically decays reset seconds, and triggers background sync."""
     cached = None
     cache_age = 999999
 
@@ -108,13 +115,25 @@ def load_cached_live_quota(model_name, is_idle=False):
                 ts = data.get("timestamp", 0)
                 cache_age = time.time() - ts
                 models = data.get("models", {})
+                
+                # 1. Exact match
                 cached = models.get(model_name)
                 
+                # 2. Normalized match if exact match fails
                 if not cached:
+                    norm_target = normalize_model_name(model_name)
                     for k, v in models.items():
-                        if model_name in k or k in model_name:
+                        norm_k = normalize_model_name(k)
+                        if norm_target == norm_k or norm_target in norm_k or norm_k in norm_target:
                             cached = v
                             break
+
+                # 3. Dynamic countdown decay based on elapsed cache age
+                if cached and "reset_in_seconds" in cached:
+                    orig_sec = cached.get("reset_in_seconds", 0)
+                    decayed_sec = max(0, orig_sec - int(cache_age))
+                    cached = dict(cached)
+                    cached["reset_in_seconds"] = decayed_sec
         except Exception:
             pass
 
@@ -177,7 +196,7 @@ def main():
     live_q = load_cached_live_quota(model_name, is_idle=is_idle)
     if live_q and live_q.get("remaining_fraction") is not None:
         rem_fraction = live_q.get("remaining_fraction")
-        if live_q.get("reset_in_seconds"):
+        if "reset_in_seconds" in live_q:
             reset_sec = live_q.get("reset_in_seconds")
 
     # Priority 2: Fallback to stdin quota if live background cache is not available
