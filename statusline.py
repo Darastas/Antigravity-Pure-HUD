@@ -2,7 +2,7 @@
 """
 Antigravity Pure HUD Engine
 A lightweight, zero-dependency status line generator for Antigravity CLI (AGY).
-Features smart dynamic quota polling, atomic file caching, real-time countdown decay, and robust model matching.
+Features robust live port discovery, atomic file caching, dynamic countdown decay, and smart background polling.
 """
 
 import sys
@@ -44,21 +44,32 @@ def normalize_model_name(name):
     """Normalize model string for accurate tier matching."""
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
+def find_active_http_port():
+    """Scan recent log files and return the port that is actively responding to GetUserStatus."""
+    log_pattern = os.path.expanduser(r"~\.gemini\antigravity-cli\log\cli-*.log")
+    logs = sorted(glob.glob(log_pattern), key=os.path.getmtime, reverse=True)
+    for log_path in logs:
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                ports = re.findall(r"listening on random port at (\d+) for HTTP", content)
+                for port in reversed(ports):
+                    try:
+                        url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+                        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=1) as res:
+                            if res.status == 200:
+                                return port
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    return None
+
 def sync_live_quota():
     """Queries local AGY language server endpoint to get fresh live model quotas."""
     try:
-        log_pattern = os.path.expanduser(r"~\.gemini\antigravity-cli\log\cli-*.log")
-        logs = sorted(glob.glob(log_pattern), key=os.path.getmtime, reverse=True)
-        if not logs:
-            return
-        
-        port = None
-        with open(logs[0], "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                m = re.search(r"listening on random port at (\d+) for HTTP", line)
-                if m:
-                    port = m.group(1)
-
+        port = find_active_http_port()
         if not port:
             return
 
