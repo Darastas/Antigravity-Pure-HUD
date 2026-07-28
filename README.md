@@ -16,11 +16,12 @@ Unlike other HUD plugins that rely on specialized Nerd Fonts (which often cause 
 
 ## Features
 
-- **Zero Dependency & Zero Font Issues**: Uses standard ASCII and cross-platform Unicode blocks that render cleanly without Nerd Fonts or encoding glitches.
-- **Near-Zero Latency (~10ms)**: Parses raw JSON directly from stdin provided by Antigravity CLI without making external network requests.
-- **Dual Directional Indicators**:
-  - **Context Window**: Forward progress (`used %`) indicating memory consumption in the current session.
-  - **Usage / 5-Hour Quota**: Reverse progress (`left %`) indicating remaining rate limit quota with live countdown reset timer.
+- **Zero Dependency & Zero Font Issues**: Renders standard Unicode blocks (`█` & `░`) cleanly across all platforms without requiring Nerd Fonts.
+- **Zero-Latency Real-Time Sync**: Combines local daemon HTTP probing with Min-Quota Arbitration to bypass backend cache delays, updating quotas instantly after every prompt.
+- **Multi-Pool Quota Tracking**:
+  - **Gemini Pool**: Tracks remaining quota percentage and reset countdown for Gemini models.
+  - **Claude / GPT (3P) Pool**: Tracks combined remaining quota for 3rd-party models.
+- **Responsive Liquid Layout**: Automatically scales progress bar lengths (10 / 8 / 6 / 4 blocks) and truncates labels based on active terminal width to prevent line wrapping.
 - **Multi-Platform Support**: Built for Windows (PowerShell / CMD), macOS, and Linux.
 
 ---
