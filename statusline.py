@@ -2,7 +2,7 @@
 """
 Antigravity Pure HUD Engine
 A lightweight, zero-dependency status line generator for Antigravity CLI (AGY).
-Features smart dynamic quota polling (prioritizes live stdin quota, fallback to background sync).
+Features smart dynamic quota polling (instant on chat completion + 60s fallback for long tasks).
 """
 
 import sys
@@ -173,27 +173,27 @@ def main():
     rem_fraction = None
     reset_sec = 0
 
-    # Priority 1: Direct stdin quota passed from AGY CLI (Always freshest during prompts)
-    quota_data = data.get("quota", {})
-    quota_item = {}
-    if isinstance(quota_data, dict):
-        quota_item = quota_data.get("gemini-5h") or quota_data.get("3p-5h") or {}
-        if not quota_item:
-            for k, v in quota_data.items():
-                if isinstance(v, dict) and "remaining_fraction" in v:
-                    quota_item = v
-                    break
+    # Priority 1: Always check live background cache (updated every 5s on chat finish, 60s for long tasks)
+    live_q = load_cached_live_quota(model_name, is_idle=is_idle)
+    if live_q and live_q.get("remaining_fraction") is not None:
+        rem_fraction = live_q.get("remaining_fraction")
+        if live_q.get("reset_in_seconds"):
+            reset_sec = live_q.get("reset_in_seconds")
 
-    rem_fraction = quota_item.get("remaining_fraction")
-    reset_sec = quota_item.get("reset_in_seconds", 0)
-
-    # Priority 2: Fallback to live background cache ONLY if stdin quota is missing
+    # Priority 2: Fallback to stdin quota if live background cache is not available
     if rem_fraction is None:
-        live_q = load_cached_live_quota(model_name, is_idle=is_idle)
-        if live_q and live_q.get("remaining_fraction") is not None:
-            rem_fraction = live_q.get("remaining_fraction")
-            if live_q.get("reset_in_seconds"):
-                reset_sec = live_q.get("reset_in_seconds")
+        quota_data = data.get("quota", {})
+        quota_item = {}
+        if isinstance(quota_data, dict):
+            quota_item = quota_data.get("gemini-5h") or quota_data.get("3p-5h") or {}
+            if not quota_item:
+                for k, v in quota_data.items():
+                    if isinstance(v, dict) and "remaining_fraction" in v:
+                        quota_item = v
+                        break
+
+        rem_fraction = quota_item.get("remaining_fraction")
+        reset_sec = quota_item.get("reset_in_seconds", 0)
 
     if rem_fraction is not None:
         rem_pct_val = float(rem_fraction) * 100
