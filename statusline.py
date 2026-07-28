@@ -244,6 +244,24 @@ def main():
             return f"{name} [{bar}] {pct:.1f}% {reset_str}"
         return f"{name} [{bar}] {pct:.1f}%"
 
+    # Arbitration: Get fresh stdin quota and apply MIN-QUOTA logic to bypass backend caching delays
+    quota_data = data.get("quota", {})
+    if isinstance(quota_data, dict):
+        g_stdin = quota_data.get("gemini-5h", {})
+        tp_stdin = quota_data.get("3p-5h", {})
+        
+        if pools:
+            if g_stdin and "remaining_fraction" in g_stdin and "Gemini" in pools:
+                pools["Gemini"]["remaining_fraction"] = min(
+                    float(pools["Gemini"]["remaining_fraction"]), 
+                    float(g_stdin["remaining_fraction"])
+                )
+            if tp_stdin and "remaining_fraction" in tp_stdin and "Claude/GPT" in pools:
+                pools["Claude/GPT"]["remaining_fraction"] = min(
+                    float(pools["Claude/GPT"]["remaining_fraction"]), 
+                    float(tp_stdin["remaining_fraction"])
+                )
+
     quota_parts = []
     if pools:
         # Display order: Gemini first, then 3P
