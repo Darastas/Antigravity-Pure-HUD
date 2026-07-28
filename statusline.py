@@ -98,14 +98,12 @@ def fetch_live_quota():
             if "remainingFraction" not in q:
                 continue
 
-            # Determine pool name
+            # Determine pool name (Claude + GPT share one 3P quota pool)
             label_lower = label.lower()
             if "gemini" in label_lower:
                 pool = "Gemini"
-            elif "claude" in label_lower:
-                pool = "Claude"
-            elif "gpt" in label_lower:
-                pool = "GPT"
+            elif "claude" in label_lower or "gpt" in label_lower:
+                pool = "Claude/GPT"
             else:
                 pool = label  # Unknown model, use label
 
@@ -225,8 +223,8 @@ def main():
 
     quota_parts = []
     if pools:
-        # Display order: Gemini first, then Claude, then GPT
-        display_order = ["Gemini", "Claude", "GPT"]
+        # Display order: Gemini first, then Claude/GPT
+        display_order = ["Gemini", "Claude/GPT"]
         for pool_name in display_order:
             if pool_name not in pools:
                 continue
@@ -234,11 +232,12 @@ def main():
             frac = p.get("remaining_fraction")
             if frac is not None:
                 pct = float(frac) * 100
+                bar = make_bar(pct, length=8)
                 reset_str = format_seconds(p.get("reset_in_seconds", 0))
                 if reset_str:
-                    quota_parts.append(f"{pool_name}: {pct:.1f}%({reset_str})")
+                    quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%({reset_str})")
                 else:
-                    quota_parts.append(f"{pool_name}: {pct:.1f}%")
+                    quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%")
 
         # Any pools not in display_order
         for pool_name, p in pools.items():
@@ -247,7 +246,8 @@ def main():
             frac = p.get("remaining_fraction")
             if frac is not None:
                 pct = float(frac) * 100
-                quota_parts.append(f"{pool_name}: {pct:.1f}%")
+                bar = make_bar(pct, length=8)
+                quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%")
 
     if not quota_parts:
         # Fallback to stdin quota if live fetch failed entirely
@@ -257,12 +257,14 @@ def main():
             tp_q = quota_data.get("3p-5h", {})
             if gemini_q and "remaining_fraction" in gemini_q:
                 g_pct = float(gemini_q["remaining_fraction"]) * 100
+                g_bar = make_bar(g_pct, length=8)
                 g_reset = format_seconds(gemini_q.get("reset_in_seconds", 0))
-                quota_parts.append(f"Gemini: {g_pct:.1f}%" + (f"({g_reset})" if g_reset else ""))
+                quota_parts.append(f"Gemini: [{g_bar}] {g_pct:.1f}%" + (f"({g_reset})" if g_reset else ""))
             if tp_q and "remaining_fraction" in tp_q:
                 t_pct = float(tp_q["remaining_fraction"]) * 100
+                t_bar = make_bar(t_pct, length=8)
                 t_reset = format_seconds(tp_q.get("reset_in_seconds", 0))
-                quota_parts.append(f"Claude/GPT: {t_pct:.1f}%" + (f"({t_reset})" if t_reset else ""))
+                quota_parts.append(f"Claude/GPT: [{t_bar}] {t_pct:.1f}%" + (f"({t_reset})" if t_reset else ""))
 
     usage_disp = " | ".join(quota_parts) if quota_parts else "Active"
 
