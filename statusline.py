@@ -40,8 +40,8 @@ def format_seconds(seconds):
     hrs = mins // 60
     remaining_mins = mins % 60
     if hrs > 0:
-        return f"{hrs}h{remaining_mins}m"
-    return f"{remaining_mins}m"
+        return f"({hrs}h {remaining_mins}m)"
+    return f"({remaining_mins}m)"
 
 def make_bar(pct, length=10, fill_char="█", empty_char="░"):
     pct = max(0.0, min(100.0, float(pct)))
