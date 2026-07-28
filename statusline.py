@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Antigravity Pure HUD Engine
-A lightweight, zero-dependency status line generator for Antigravity CLI (AGY).
-Features smart dynamic quota polling, min-quota arbitration, atomic file caching, and live port discovery.
+Antigravity Pure HUD Engine v2
+Zero-dependency status line for Antigravity CLI (AGY).
+
+Architecture:
+  - AGY CLI calls this script via stdin pipe on EVERY prompt and EVERY response.
+  - On each call, we do a SYNCHRONOUS (blocking) HTTP query to the local AGY daemon
+    to get the absolute freshest quota data. This is fast (~5ms localhost).
+  - If the sync call fails, we fall back to stdin quota data.
+  - We cache the result so the next call within TTL skips the HTTP query.
+  - Shows all quota pools: Gemini, Claude/GPT (3P).
 """
 
 import sys
@@ -12,18 +19,19 @@ import glob
 import re
 import time
 import urllib.request
-import subprocess
 from datetime import datetime
 
 CACHE_FILE = os.path.expanduser(r"~\.antigravity\live-cache.json")
-LONG_TASK_TTL = 60  # Fallback sync interval for long tasks
-SHORT_CHAT_TTL = 5   # Cooldown interval after AI finishes answering
+CACHE_TTL = 4  # Seconds. Re-query if cache older than this.
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+# ── Utilities ──────────────────────────────────────────────────────────────
 
 def format_seconds(seconds):
     if not seconds or seconds <= 0:
@@ -32,7 +40,7 @@ def format_seconds(seconds):
     hrs = mins // 60
     remaining_mins = mins % 60
     if hrs > 0:
-        return f"{hrs}h {remaining_mins}m"
+        return f"{hrs}h{remaining_mins}m"
     return f"{remaining_mins}m"
 
 def make_bar(pct, length=10, fill_char="█", empty_char="░"):
@@ -40,129 +48,146 @@ def make_bar(pct, length=10, fill_char="█", empty_char="░"):
     filled_len = int(round(length * pct / 100))
     return fill_char * filled_len + empty_char * (length - filled_len)
 
-def normalize_model_name(name):
-    """Normalize model string for accurate tier matching."""
-    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+# ── Port Discovery ────────────────────────────────────────────────────────
 
 def find_active_http_port():
-    """Scan recent log files and return the port that is actively responding to GetUserStatus."""
+    """Find the AGY daemon HTTP port by scanning logs and verifying liveness."""
     log_pattern = os.path.expanduser(r"~\.gemini\antigravity-cli\log\cli-*.log")
     logs = sorted(glob.glob(log_pattern), key=os.path.getmtime, reverse=True)
-    for log_path in logs:
+    for log_path in logs[:3]:  # Only check 3 most recent logs
         try:
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-                ports = re.findall(r"listening on random port at (\d+) for HTTP", content)
-                for port in reversed(ports):
-                    try:
-                        url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
-                        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
-                        with urllib.request.urlopen(req, timeout=1) as res:
-                            if res.status == 200:
-                                return port
-                    except Exception:
-                        pass
+            ports = re.findall(r"listening on random port at (\d+) for HTTP", content)
+            for port in reversed(ports):
+                try:
+                    url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+                    req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=1) as res:
+                        if res.status == 200:
+                            return port
+                except Exception:
+                    pass
         except Exception:
             continue
     return None
 
-def sync_live_quota():
-    """Queries local AGY language server endpoint to get fresh live model quotas."""
+
+# ── Live Quota Sync ───────────────────────────────────────────────────────
+
+def fetch_live_quota():
+    """Synchronously fetch fresh quota from local AGY daemon. Returns dict of quota pools or None."""
     try:
         port = find_active_http_port()
         if not port:
-            return
+            return None
 
         url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
         req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"})
-        res = urllib.request.urlopen(req, timeout=3)
+        res = urllib.request.urlopen(req, timeout=2)
         data = json.loads(res.read().decode("utf-8"))
 
-        models = data.get("userStatus", {}).get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
-        model_map = {}
-        for m in models:
-            label = m.get("label")
+        configs = data.get("userStatus", {}).get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
+
+        # Group models into quota pools
+        pools = {}  # pool_name -> {remaining_fraction, reset_in_seconds}
+        for m in configs:
+            label = m.get("label", "")
             q = m.get("quotaInfo", {})
-            if label and "remainingFraction" in q:
-                reset_sec = 0
-                reset_time_str = q.get("resetTime")
-                if reset_time_str:
-                    try:
-                        clean_ts = reset_time_str.replace("Z", "+00:00")
-                        dt = datetime.fromisoformat(clean_ts)
-                        now = datetime.now(dt.tzinfo)
-                        reset_sec = max(0, int((dt - now).total_seconds()))
-                    except Exception:
-                        pass
-                
-                model_map[label] = {
-                    "remaining_fraction": q.get("remainingFraction"),
-                    "reset_in_seconds": reset_sec
-                }
+            if "remainingFraction" not in q:
+                continue
 
-        cache_data = {
-            "timestamp": time.time(),
-            "models": model_map
-        }
+            # Determine pool name
+            label_lower = label.lower()
+            if "gemini" in label_lower:
+                pool = "Gemini"
+            elif "claude" in label_lower:
+                pool = "Claude"
+            elif "gpt" in label_lower:
+                pool = "GPT"
+            else:
+                pool = label  # Unknown model, use label
 
-        # Atomic write to prevent file read conflicts
+            if pool in pools:
+                continue  # Same pool already recorded
+
+            reset_sec = 0
+            reset_time_str = q.get("resetTime")
+            if reset_time_str:
+                try:
+                    clean_ts = reset_time_str.replace("Z", "+00:00")
+                    dt = datetime.fromisoformat(clean_ts)
+                    now = datetime.now(dt.tzinfo)
+                    reset_sec = max(0, int((dt - now).total_seconds()))
+                except Exception:
+                    pass
+
+            pools[pool] = {
+                "remaining_fraction": q.get("remainingFraction"),
+                "reset_in_seconds": reset_sec
+            }
+
+        # Save to cache
+        cache_data = {"timestamp": time.time(), "pools": pools}
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
         tmp_file = CACHE_FILE + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(cache_data, f)
         os.replace(tmp_file, CACHE_FILE)
+
+        return pools
     except Exception:
-        pass
+        return None
 
-def load_cached_live_quota(model_name, is_idle=False):
-    """Loads cached live quota if fresh, dynamically decays reset seconds, and triggers background sync."""
-    cached = None
-    cache_age = 999999
 
+def get_quota_pools():
+    """Get quota pools, using cache if fresh, otherwise fetching live."""
+    # Check if cache is fresh enough
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                ts = data.get("timestamp", 0)
-                cache_age = time.time() - ts
-                models = data.get("models", {})
-                
-                # 1. Exact match
-                cached = models.get(model_name)
-                
-                # 2. Normalized match if exact match fails
-                if not cached:
-                    norm_target = normalize_model_name(model_name)
-                    for k, v in models.items():
-                        norm_k = normalize_model_name(k)
-                        if norm_target == norm_k or norm_target in norm_k or norm_k in norm_target:
-                            cached = v
-                            break
-
-                # 3. Dynamic countdown decay based on elapsed cache age
-                if cached and "reset_in_seconds" in cached:
-                    orig_sec = cached.get("reset_in_seconds", 0)
-                    decayed_sec = max(0, orig_sec - int(cache_age))
-                    cached = dict(cached)
-                    cached["reset_in_seconds"] = decayed_sec
+            ts = data.get("timestamp", 0)
+            cache_age = time.time() - ts
+            if cache_age < CACHE_TTL:
+                pools = data.get("pools", {})
+                # Decay reset timers
+                for pool in pools.values():
+                    if "reset_in_seconds" in pool:
+                        pool["reset_in_seconds"] = max(0, pool["reset_in_seconds"] - int(cache_age))
+                return pools
         except Exception:
             pass
 
-    target_ttl = SHORT_CHAT_TTL if is_idle else LONG_TASK_TTL
+    # Cache is stale or missing: fetch live (synchronous, ~5ms on localhost)
+    pools = fetch_live_quota()
+    if pools:
+        return pools
 
-    if cache_age >= target_ttl:
+    # Last resort: try to use stale cache
+    if os.path.exists(CACHE_FILE):
         try:
-            py_exe = sys.executable
-            script_path = os.path.abspath(__file__)
-            subprocess.Popen([py_exe, script_path, "--sync-live"], creationflags=0x08000000 if os.name == 'nt' else 0)
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pools = data.get("pools", {})
+            cache_age = time.time() - data.get("timestamp", 0)
+            for pool in pools.values():
+                if "reset_in_seconds" in pool:
+                    pool["reset_in_seconds"] = max(0, pool["reset_in_seconds"] - int(cache_age))
+            return pools
         except Exception:
             pass
 
-    return cached
+    return None
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
+    # Legacy background sync entry point (no longer used, kept for compat)
     if "--sync-live" in sys.argv:
-        sync_live_quota()
+        fetch_live_quota()
         return
 
     try:
@@ -193,71 +218,55 @@ def main():
         used_pct_val = ((tot_in + tot_out) / max(1, size)) * 100
 
     ctx_bar = make_bar(used_pct_val, length=10)
-    ctx_disp = f"[{ctx_bar}] {used_pct_val:.1f}% used"
+    ctx_disp = f"[{ctx_bar}] {used_pct_val:.1f}%"
 
-    # Check agent state
-    agent_state = data.get("agent_state", "idle")
-    is_idle = (agent_state == "idle")
+    # 3. Multi-Pool Quota Display
+    pools = get_quota_pools()
 
-    # 3. Usage / Quota Arbitration (Min-Value Principle)
-    stdin_frac = None
-    stdin_reset = 0
+    quota_parts = []
+    if pools:
+        # Display order: Gemini first, then Claude, then GPT
+        display_order = ["Gemini", "Claude", "GPT"]
+        for pool_name in display_order:
+            if pool_name not in pools:
+                continue
+            p = pools[pool_name]
+            frac = p.get("remaining_fraction")
+            if frac is not None:
+                pct = float(frac) * 100
+                reset_str = format_seconds(p.get("reset_in_seconds", 0))
+                if reset_str:
+                    quota_parts.append(f"{pool_name}: {pct:.1f}%({reset_str})")
+                else:
+                    quota_parts.append(f"{pool_name}: {pct:.1f}%")
 
-    quota_data = data.get("quota", {})
-    if isinstance(quota_data, dict):
-        quota_item = quota_data.get("gemini-5h") or quota_data.get("3p-5h") or {}
-        if not quota_item:
-            for k, v in quota_data.items():
-                if isinstance(v, dict) and "remaining_fraction" in v:
-                    quota_item = v
-                    break
-        if quota_item:
-            stdin_frac = quota_item.get("remaining_fraction")
-            stdin_reset = quota_item.get("reset_in_seconds", 0)
+        # Any pools not in display_order
+        for pool_name, p in pools.items():
+            if pool_name in display_order:
+                continue
+            frac = p.get("remaining_fraction")
+            if frac is not None:
+                pct = float(frac) * 100
+                quota_parts.append(f"{pool_name}: {pct:.1f}%")
 
-    # Load live background cache
-    live_q = load_cached_live_quota(model_name, is_idle=is_idle)
-    cache_frac = live_q.get("remaining_fraction") if live_q else None
-    cache_reset = live_q.get("reset_in_seconds", 0) if live_q else 0
+    if not quota_parts:
+        # Fallback to stdin quota if live fetch failed entirely
+        quota_data = data.get("quota", {})
+        if isinstance(quota_data, dict):
+            gemini_q = quota_data.get("gemini-5h", {})
+            tp_q = quota_data.get("3p-5h", {})
+            if gemini_q and "remaining_fraction" in gemini_q:
+                g_pct = float(gemini_q["remaining_fraction"]) * 100
+                g_reset = format_seconds(gemini_q.get("reset_in_seconds", 0))
+                quota_parts.append(f"Gemini: {g_pct:.1f}%" + (f"({g_reset})" if g_reset else ""))
+            if tp_q and "remaining_fraction" in tp_q:
+                t_pct = float(tp_q["remaining_fraction"]) * 100
+                t_reset = format_seconds(tp_q.get("reset_in_seconds", 0))
+                quota_parts.append(f"Claude/GPT: {t_pct:.1f}%" + (f"({t_reset})" if t_reset else ""))
 
-    # Arbitrate final quota:
-    # Always pick the MINIMUM remaining fraction (most consumed / newest data)
-    # unless a quota reset occurred (e.g. fraction jumped back to ~1.0)
-    final_frac = None
-    final_reset = 0
+    usage_disp = " | ".join(quota_parts) if quota_parts else "Active"
 
-    if stdin_frac is not None and cache_frac is not None:
-        if cache_frac - stdin_frac > 0.4:
-            final_frac = cache_frac
-            final_reset = cache_reset
-        elif stdin_frac - cache_frac > 0.4:
-            final_frac = stdin_frac
-            final_reset = stdin_reset
-        else:
-            if stdin_frac <= cache_frac:
-                final_frac = stdin_frac
-                final_reset = stdin_reset
-            else:
-                final_frac = cache_frac
-                final_reset = cache_reset
-    elif stdin_frac is not None:
-        final_frac = stdin_frac
-        final_reset = stdin_reset
-    elif cache_frac is not None:
-        final_frac = cache_frac
-        final_reset = cache_reset
-
-    if final_frac is not None:
-        rem_pct_val = float(final_frac) * 100
-        quota_bar = make_bar(rem_pct_val, length=10)
-        usage_disp = f"[{quota_bar}] {rem_pct_val:.1f}% left"
-        reset_str = format_seconds(final_reset)
-        if reset_str:
-            usage_disp += f" (resets in {reset_str})"
-    else:
-        usage_disp = "Active"
-
-    print(f"Model: {model_name} | Context: {ctx_disp} | Usage: {usage_disp}")
+    print(f"{model_name} | Ctx: {ctx_disp} | {usage_disp}")
 
 if __name__ == "__main__":
     main()
