@@ -183,11 +183,6 @@ def get_quota_pools():
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
-    # Legacy background sync entry point (no longer used, kept for compat)
-    if "--sync-live" in sys.argv:
-        fetch_live_quota()
-        return
-
     try:
         raw = sys.stdin.read()
         if not raw or not raw.strip():
