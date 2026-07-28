@@ -197,7 +197,10 @@ def main():
         print("[AGY Status] Active")
         return
 
-    # 1. Model Name
+    # Terminal width for adaptive display
+    term_width = data.get("terminal_width", 120)
+
+    # 1. Model Name (compact)
     model_obj = data.get("model", {})
     if isinstance(model_obj, dict):
         model_name = model_obj.get("display_name") or model_obj.get("id") or "Gemini"
@@ -215,60 +218,55 @@ def main():
         size = ctx.get("context_window_size", 1048576)
         used_pct_val = ((tot_in + tot_out) / max(1, size)) * 100
 
-    ctx_bar = make_bar(used_pct_val, length=10)
+    bar_len = 5
+    ctx_bar = make_bar(used_pct_val, length=bar_len)
     ctx_disp = f"[{ctx_bar}] {used_pct_val:.1f}%"
 
     # 3. Multi-Pool Quota Display
     pools = get_quota_pools()
 
+    def format_pool(name, frac, reset_sec, bar_len):
+        pct = float(frac) * 100
+        bar = make_bar(pct, length=bar_len)
+        reset_str = format_seconds(reset_sec)
+        if reset_str:
+            return f"{name} [{bar}] {pct:.1f}% {reset_str}"
+        return f"{name} [{bar}] {pct:.1f}%"
+
     quota_parts = []
     if pools:
-        # Display order: Gemini first, then Claude/GPT
-        display_order = ["Gemini", "Claude/GPT"]
-        for pool_name in display_order:
-            if pool_name not in pools:
+        # Display order: Gemini first, then 3P
+        pool_map = [("Gemini", "Gemini"), ("3P", "Claude/GPT")]
+        for label, key in pool_map:
+            if key not in pools:
                 continue
-            p = pools[pool_name]
+            p = pools[key]
             frac = p.get("remaining_fraction")
             if frac is not None:
-                pct = float(frac) * 100
-                bar = make_bar(pct, length=8)
-                reset_str = format_seconds(p.get("reset_in_seconds", 0))
-                if reset_str:
-                    quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%({reset_str})")
-                else:
-                    quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%")
+                quota_parts.append(format_pool(label, frac, p.get("reset_in_seconds", 0), bar_len))
 
-        # Any pools not in display_order
+        # Any unexpected pools
         for pool_name, p in pools.items():
-            if pool_name in display_order:
+            if pool_name in ("Gemini", "Claude/GPT"):
                 continue
             frac = p.get("remaining_fraction")
             if frac is not None:
-                pct = float(frac) * 100
-                bar = make_bar(pct, length=8)
-                quota_parts.append(f"{pool_name}: [{bar}] {pct:.1f}%")
+                quota_parts.append(format_pool(pool_name, frac, p.get("reset_in_seconds", 0), bar_len))
 
     if not quota_parts:
-        # Fallback to stdin quota if live fetch failed entirely
+        # Fallback to stdin quota
         quota_data = data.get("quota", {})
         if isinstance(quota_data, dict):
             gemini_q = quota_data.get("gemini-5h", {})
             tp_q = quota_data.get("3p-5h", {})
             if gemini_q and "remaining_fraction" in gemini_q:
-                g_pct = float(gemini_q["remaining_fraction"]) * 100
-                g_bar = make_bar(g_pct, length=8)
-                g_reset = format_seconds(gemini_q.get("reset_in_seconds", 0))
-                quota_parts.append(f"Gemini: [{g_bar}] {g_pct:.1f}%" + (f"({g_reset})" if g_reset else ""))
+                quota_parts.append(format_pool("Gemini", gemini_q["remaining_fraction"], gemini_q.get("reset_in_seconds", 0), bar_len))
             if tp_q and "remaining_fraction" in tp_q:
-                t_pct = float(tp_q["remaining_fraction"]) * 100
-                t_bar = make_bar(t_pct, length=8)
-                t_reset = format_seconds(tp_q.get("reset_in_seconds", 0))
-                quota_parts.append(f"Claude/GPT: [{t_bar}] {t_pct:.1f}%" + (f"({t_reset})" if t_reset else ""))
+                quota_parts.append(format_pool("3P", tp_q["remaining_fraction"], tp_q.get("reset_in_seconds", 0), bar_len))
 
     usage_disp = " | ".join(quota_parts) if quota_parts else "Active"
 
-    print(f"{model_name} | Ctx: {ctx_disp} | {usage_disp}")
+    print(f"{model_name} | Ctx {ctx_disp} | {usage_disp}")
 
 if __name__ == "__main__":
     main()
