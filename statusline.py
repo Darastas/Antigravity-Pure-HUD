@@ -22,7 +22,7 @@ import urllib.request
 from datetime import datetime
 
 CACHE_FILE = os.path.expanduser(r"~\.antigravity\live-cache.json")
-CACHE_TTL = 4  # Seconds. Re-query if cache older than this.
+CACHE_TTL = 0.2  # Seconds. Ultra-low TTL to guarantee instant quota refresh on every keystroke or response.
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -199,6 +199,8 @@ def main():
 
     # Terminal width for adaptive display
     term_width = data.get("terminal_width", 120)
+    lbl_ctx = "Context" if term_width >= 100 else "Ctx"
+    lbl_3p = "Claude/GPT" if term_width >= 105 else "3P"
 
     # 1. Model Name (compact)
     model_obj = data.get("model", {})
@@ -236,7 +238,7 @@ def main():
     quota_parts = []
     if pools:
         # Display order: Gemini first, then 3P
-        pool_map = [("Gemini", "Gemini"), ("3P", "Claude/GPT")]
+        pool_map = [("Gemini", "Gemini"), (lbl_3p, "Claude/GPT")]
         for label, key in pool_map:
             if key not in pools:
                 continue
@@ -262,11 +264,11 @@ def main():
             if gemini_q and "remaining_fraction" in gemini_q:
                 quota_parts.append(format_pool("Gemini", gemini_q["remaining_fraction"], gemini_q.get("reset_in_seconds", 0), bar_len))
             if tp_q and "remaining_fraction" in tp_q:
-                quota_parts.append(format_pool("3P", tp_q["remaining_fraction"], tp_q.get("reset_in_seconds", 0), bar_len))
+                quota_parts.append(format_pool(lbl_3p, tp_q["remaining_fraction"], tp_q.get("reset_in_seconds", 0), bar_len))
 
     usage_disp = " | ".join(quota_parts) if quota_parts else "Active"
 
-    print(f"{model_name} | Ctx {ctx_disp} | {usage_disp}")
+    print(f"{model_name} | {lbl_ctx} {ctx_disp} | {usage_disp}")
 
 if __name__ == "__main__":
     main()
