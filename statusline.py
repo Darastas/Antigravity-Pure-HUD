@@ -220,7 +220,16 @@ def main():
         size = ctx.get("context_window_size", 1048576)
         used_pct_val = ((tot_in + tot_out) / max(1, size)) * 100
 
-    bar_len = 5
+    # Dynamic Progress Bar Length
+    if term_width >= 140:
+        bar_len = 10
+    elif term_width >= 110:
+        bar_len = 8
+    elif term_width >= 90:
+        bar_len = 6
+    else:
+        bar_len = 4
+
     ctx_bar = make_bar(used_pct_val, length=bar_len)
     ctx_disp = f"[{ctx_bar}] {used_pct_val:.1f}%"
 
