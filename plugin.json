@@ -1,0 +1,7 @@
+{
+  "name": "antigravity-pure-hud",
+  "version": "1.0.0",
+  "description": "Zero-dependency, multi-platform, ASCII-safe Status Line HUD for Antigravity CLI (AGY)",
+  "author": "Darastas",
+  "license": "MIT"
+}

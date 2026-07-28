@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+debug.json
+.DS_Store
+*.tmp
